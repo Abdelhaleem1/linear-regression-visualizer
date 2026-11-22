@@ -143,10 +143,10 @@
                   <span id="gd-btn-label">Gradient Descent</span>
                 </button>
                 <button id="btn-gd-step" class="btn btn-mini" type="button" title="Run 1 gradient descent step">Step</button>
-                <div class="lr-wrap" title="Learning rate (α)">
+                <div class="lr-wrap" title="Learning rate (α): low = slow, middle = good, high = oscillate">
                   <span class="mono lr-label">α</span>
-                  <input id="slider-lr" type="range" min="0.01" max="0.35" step="0.01" value="0.08" class="range-input range-lr" />
-                  <span class="mono lr-val" id="val-lr">0.08</span>
+                  <input id="slider-lr" type="range" min="0" max="100" step="1" value="50" class="range-input range-lr" />
+                  <span class="mono lr-val" id="val-lr">0.090</span>
                 </div>
                 <span class="mono gd-iter" id="gd-iter">#0</span>
               </div>
@@ -200,6 +200,6 @@
     </main>
   </div>
 
-  <script src="app.js?v=7"></script>
+  <script src="app.js?v=8"></script>
 </body>
 </html>

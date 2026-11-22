@@ -277,9 +277,10 @@
     animFrame: null,
     gd: {
       running: false,
-      lr: 0.08,
+      lr: 0.09,
       iter: 0,
       timer: null,
+      trail: [],
     },
     undoStack: [],
     sliderGesture: {
@@ -629,10 +630,42 @@
     stopAllMotion();
     const preset = P();
     state.gd.iter = 0;
+    state.gd.trail = [];
     const { w, b } = preset.randomLine(state.opt);
     state.w = clamp(w, preset.wMin, preset.wMax);
     state.b = clamp(b, preset.bMin, preset.bMax);
     renderAll();
+  }
+
+  // =========================================================================
+  // Learning Rate Mapping (0..100 slider -> low=slow, middle=good, high=oscillate)
+  // =========================================================================
+  const LR_KNOTS = [
+    [0, 0.005],   // very slow crawl
+    [25, 0.02],   // slow
+    [50, 0.09],   // middle: smooth, good convergence
+    [72, 0.30],   // fast, still smooth
+    [82, 0.68],   // starts bouncing / oscillating across minimum
+    [92, 0.92],   // strong back-and-forth oscillation
+    [100, 1.08],  // diverging oscillation
+  ];
+
+  function sliderPosToLr(pos) {
+    const p = clamp(pos, 0, 100);
+    for (let i = 0; i < LR_KNOTS.length - 1; i++) {
+      const [p0, lr0] = LR_KNOTS[i];
+      const [p1, lr1] = LR_KNOTS[i + 1];
+      if (p <= p1) {
+        const t = (p - p0) / (p1 - p0);
+        return lr0 * Math.pow(lr1 / lr0, t);
+      }
+    }
+    return LR_KNOTS[LR_KNOTS.length - 1][1];
+  }
+
+  function formatLr(lr) {
+    if (lr < 0.1) return lr.toFixed(3);
+    return lr.toFixed(2);
   }
 
   // =========================================================================
@@ -647,7 +680,7 @@
 
   function stopGradientDescent() {
     if (state.gd.timer !== null) {
-      clearInterval(state.gd.timer);
+      clearTimeout(state.gd.timer);
       state.gd.timer = null;
     }
     if (state.gd.running) {
@@ -669,15 +702,35 @@
       : '<polygon points="5 3 19 12 5 21 5 3"></polygon>';
   }
 
+  function scheduleNextGdStep() {
+    if (!state.gd.running) return;
+    // Slightly slower step cadence when oscillating (α > 0.5) so each bounce is clearly visible
+    const delay = state.gd.lr > 0.5 ? 190 : 55;
+    state.gd.timer = setTimeout(() => {
+      state.gd.timer = null;
+      if (!state.gd.running) return;
+      gradientDescentStep();
+      scheduleNextGdStep();
+    }, delay);
+  }
+
   /**
    * Executes one exact Gradient Descent step in standardized x coordinates
    * z = (x - meanX) / stdX, then maps cleanly back to original (w, b).
-   * Guarantees smooth, stable descent across all scales (e.g. House sqft & Random).
+   * In standardized coordinates the Hessian is exactly 2*I, so:
+   *  - α < 0.03: very slow crawl
+   *  - α ≈ 0.08–0.30: smooth, fast convergence
+   *  - 0.50 < α < 1.00: damped oscillation bouncing across the parabola
+   *  - α >= 1.00: sustained / diverging oscillation
    */
   function gradientDescentStep() {
     const preset = P();
     const n = state.points.length;
     if (n === 0) return;
+
+    if (state.gd.trail.length === 0) {
+      state.gd.trail.push({ w: state.w, b: state.b });
+    }
 
     const { meanX, stdX, stdY } = state.stats;
     let wNorm = state.w * stdX;
@@ -703,9 +756,13 @@
     state.w = nextW;
     state.b = nextB;
     state.gd.iter += 1;
+    state.gd.trail.push({ w: state.w, b: state.b });
+    if (state.gd.trail.length > 16) {
+      state.gd.trail.shift();
+    }
     renderAll();
 
-    // Recompute normalized gradient magnitude for scale-invariant convergence check
+    // Scale-invariant convergence check
     let checkW = 0;
     let checkB = 0;
     const nw = state.w * stdX;
@@ -731,13 +788,12 @@
     state.gd.running = true;
     syncGDButton();
     gradientDescentStep();
-    if (state.gd.running) {
-      state.gd.timer = setInterval(gradientDescentStep, 55);
-    }
+    scheduleNextGdStep();
   }
 
   function animateToBestFit() {
     stopAllMotion();
+    state.gd.trail = [];
     const startW = state.w;
     const startB = state.b;
     const targetW = state.opt.w;
@@ -1526,6 +1582,34 @@
     ctx.lineTo(toX(t2x), toY(t2y));
     ctx.stroke();
 
+    // 4b. Gradient Descent step trail (makes low-lr crawl vs high-lr oscillation unmistakable)
+    if (options.trailPoints && options.trailPoints.length > 1) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(124, 58, 237, 0.55)';
+      ctx.lineWidth = 1.6;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      for (let i = 0; i < options.trailPoints.length; i++) {
+        const tp = options.trailPoints[i];
+        const tx = toX(tp.param);
+        const ty = toY(tp.mse);
+        if (i === 0) ctx.moveTo(tx, ty);
+        else ctx.lineTo(tx, ty);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      for (let i = 0; i < options.trailPoints.length - 1; i++) {
+        const tp = options.trailPoints[i];
+        const alpha = 0.2 + (0.65 * i) / options.trailPoints.length;
+        ctx.beginPath();
+        ctx.arc(toX(tp.param), toY(tp.mse), 3, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(124, 58, 237, ${alpha.toFixed(2)})`;
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
     // 5. Drop lines
     ctx.strokeStyle = color;
     ctx.globalAlpha = 0.55;
@@ -1581,6 +1665,8 @@
   function renderCostPlots() {
     const preset = P();
     const grads = computeGradients(state.w, state.b);
+    const wTrail = state.gd.trail.map((pt) => ({ param: pt.w, mse: computeMSE(pt.w, pt.b) }));
+    const bTrail = state.gd.trail.map((pt) => ({ param: pt.b, mse: computeMSE(pt.w, pt.b) }));
 
     renderCostPlot({
       canvas: dom.costWCanvas,
@@ -1597,6 +1683,7 @@
       evalOptSlice: (wVal) => computeMSE(wVal, state.opt.b),
       gradient: grads.dw,
       formatParam: formatW,
+      trailPoints: wTrail,
     });
 
     renderCostPlot({
@@ -1614,6 +1701,7 @@
       evalOptSlice: (bVal) => computeMSE(state.opt.w, bVal),
       gradient: grads.db,
       formatParam: formatB,
+      trailPoints: bTrail,
     });
   }
 
@@ -1637,7 +1725,7 @@
     dom.msePill.classList.toggle('optimal', isNearOptimal());
 
     dom.gdIter.textContent = `#${state.gd.iter}`;
-    dom.valLr.textContent = state.gd.lr.toFixed(2);
+    dom.valLr.textContent = formatLr(state.gd.lr);
 
     dom.predictXName.textContent = getXLabel();
     dom.predictYName.textContent = getYLabel();
@@ -1802,6 +1890,7 @@
 
     if (hit.type) {
       stopAllMotion();
+      state.gd.trail = [];
       dom.mainCanvas.setPointerCapture(evt.pointerId);
       const dataX = hit.box.fromX(pos.x);
       const dataY = hit.box.fromY(pos.y);
@@ -1969,6 +2058,7 @@
 
     canvas.addEventListener('pointerdown', (evt) => {
       stopAllMotion();
+      state.gd.trail = [];
       state.costDrag = paramKey;
       canvas.setPointerCapture(evt.pointerId);
       scrubFromEvent(evt);
@@ -2006,6 +2096,7 @@
 
     inputEl.addEventListener('input', () => {
       stopAllMotion();
+      state.gd.trail = [];
       const nextVal = parseFloat(inputEl.value);
       if (state.sliderGesture.param === paramKey) {
         if (!state.sliderGesture.recorded && Math.abs(nextVal - state.sliderGesture.startValue) > 1e-9) {
@@ -2127,7 +2218,7 @@
   });
 
   dom.sliderLr.addEventListener('input', () => {
-    state.gd.lr = parseFloat(dom.sliderLr.value);
+    state.gd.lr = sliderPosToLr(parseFloat(dom.sliderLr.value));
     syncUI();
   });
 
@@ -2150,5 +2241,6 @@
   // =========================================================================
   // Boot
   // =========================================================================
+  state.gd.lr = sliderPosToLr(parseFloat(dom.sliderLr.value));
   applyPreset('random');
 })();
